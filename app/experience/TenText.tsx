@@ -38,29 +38,28 @@ function Ten3D() {
   const outlineMaterialRef = useRef<THREE.MeshStandardMaterial>(null);
   const [hovered, setHovered] = useState(false);
   const pulse = useRef(0);
-  const targetTilt = useRef(new THREE.Vector2(0, 0));
-  const currentTilt = useRef(new THREE.Vector2(0, 0));
+  const targetTilt = useRef(0);
+  const currentTilt = useRef(0);
   const idleSpin = useRef(0);
   const glowColor = useRef(new THREE.Color("#4fd6ff"));
 
-  // Drag-to-rotate: click and drag the "10" to spin it directly. The
+  // Drag-to-rotate: click and drag the "10" to spin it directly, around the
+  // Y axis only — a simple turntable spin rather than a free tumble. The
   // rotation this produces persists (dragRotation) instead of springing
   // back, so it genuinely feels controllable rather than just reactive.
   // Momentum coasts a long time and a double-click gives it a hard flick,
   // so it actually feels like a toy you're playing with.
   const draggingRef = useRef(false);
   const lastPointer = useRef({ x: 0, y: 0 });
-  const dragRotation = useRef(new THREE.Vector2(0, 0));
-  const dragVelocity = useRef(new THREE.Vector2(0, 0));
+  const dragRotation = useRef(0);
+  const dragVelocity = useRef(0);
 
   useEffect(() => {
     const onMove = (e: PointerEvent) => {
       if (!draggingRef.current) return;
       const dx = e.clientX - lastPointer.current.x;
-      const dy = e.clientY - lastPointer.current.y;
-      dragRotation.current.x += dx * 0.012;
-      dragRotation.current.y += dy * 0.012;
-      dragVelocity.current.set(dx * 0.012, dy * 0.012);
+      dragRotation.current += dx * 0.012;
+      dragVelocity.current = dx * 0.012;
       lastPointer.current = { x: e.clientX, y: e.clientY };
     };
     const onUp = () => {
@@ -80,16 +79,19 @@ function Ten3D() {
   useFrame((state, delta) => {
     const visibility = getVisibility();
 
-    targetTilt.current.set(state.pointer.x, state.pointer.y);
-    currentTilt.current.lerp(targetTilt.current, 0.05);
+    targetTilt.current = state.pointer.x;
+    currentTilt.current = THREE.MathUtils.lerp(
+      currentTilt.current,
+      targetTilt.current,
+      0.05
+    );
     pulse.current = Math.max(0, pulse.current - delta * 1.8);
 
     if (!draggingRef.current) {
       // Let released drag spin gently coast to a stop, otherwise idle-spin.
-      if (dragVelocity.current.lengthSq() > 0.000005) {
-        dragRotation.current.x += dragVelocity.current.x;
-        dragRotation.current.y += dragVelocity.current.y;
-        dragVelocity.current.multiplyScalar(0.975);
+      if (Math.abs(dragVelocity.current) > 0.0022) {
+        dragRotation.current += dragVelocity.current;
+        dragVelocity.current *= 0.975;
       } else {
         idleSpin.current += delta * 0.06;
       }
@@ -103,7 +105,7 @@ function Ten3D() {
       // raycasting bounds right at the pointer, which flickers hover
       // on/off and reads as a jumpy glitch. Hover is glow-only now.
       // A little squash/stretch tied to spin speed for a "juicy" toy feel.
-      const speed = dragVelocity.current.length();
+      const speed = Math.abs(dragVelocity.current);
       const stretch = THREE.MathUtils.clamp(speed * 4, 0, 0.18);
       groupRef.current.scale.set(
         baseScale * pulseBump * (1 + stretch),
@@ -111,15 +113,14 @@ function Ten3D() {
         baseScale * pulseBump
       );
 
+      // Y axis only — no pitch/tilt-forward, just a clean turntable spin.
       const tiltFactor = draggingRef.current ? 0 : 1;
       groupRef.current.rotation.y =
-        dragRotation.current.x + currentTilt.current.x * 0.35 * tiltFactor + idleSpin.current;
-      groupRef.current.rotation.x =
-        dragRotation.current.y - currentTilt.current.y * 0.2 * tiltFactor;
+        dragRotation.current + currentTilt.current * 0.35 * tiltFactor + idleSpin.current;
     }
 
     const targetGlow = (hovered ? 1.9 : 1.15) + pulse.current * 1.6;
-    const spinSpeed = Math.min(1, dragVelocity.current.length() * 6);
+    const spinSpeed = Math.min(1, Math.abs(dragVelocity.current) * 6);
     // The glow shifts toward white the faster it's spinning — visible,
     // fun feedback that the interaction is actually doing something.
     glowColor.current.set("#4fd6ff").lerp(
@@ -167,7 +168,7 @@ function Ten3D() {
       onPointerDown={(e: ThreeEvent<PointerEvent>) => {
         e.stopPropagation();
         draggingRef.current = true;
-        dragVelocity.current.set(0, 0);
+        dragVelocity.current = 0;
         lastPointer.current = { x: e.clientX, y: e.clientY };
         window.dispatchEvent(new CustomEvent("cursor-drag", { detail: true }));
       }}
@@ -179,7 +180,7 @@ function Ten3D() {
         e.stopPropagation();
         // A fun little "flick it hard" gesture.
         const kick = (Math.random() - 0.5) * 0.5;
-        dragVelocity.current.set(0.4 + kick, kick * 0.4);
+        dragVelocity.current = 0.4 + kick;
         pulse.current = 1;
       }}
     >

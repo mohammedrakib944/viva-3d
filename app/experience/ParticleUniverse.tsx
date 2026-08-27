@@ -1,10 +1,11 @@
 "use client";
 
-import { useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 import { useScroll } from "./ScrollProvider";
 import { TEN_Z, TUNNEL_LENGTH } from "./data";
+import { makeStarTexture } from "./starTexture";
 
 const COUNT = 1400;
 const CONVERGE_Z = TEN_Z;
@@ -18,6 +19,7 @@ export default function ParticleUniverse() {
   const { progressRef } = useScroll();
   const pointsRef = useRef<THREE.Points>(null);
   const groupRef = useRef<THREE.Group>(null);
+  const starTexture = useMemo(() => makeStarTexture(), []);
 
   const { base, converge, colors } = useMemo(() => {
     const base = new Float32Array(COUNT * 3);
@@ -58,6 +60,10 @@ export default function ParticleUniverse() {
 
   const positions = useMemo(() => new Float32Array(base), [base]);
   const prevBlend = useRef(-1);
+
+  useEffect(() => {
+    return () => starTexture.dispose();
+  }, [starTexture]);
 
   useFrame((state, delta) => {
     const p = progressRef.current.value;
@@ -119,7 +125,9 @@ export default function ParticleUniverse() {
           />
         </bufferGeometry>
         <pointsMaterial
-          size={0.055}
+          map={starTexture}
+          alphaTest={0.05}
+          size={0.16}
           vertexColors
           transparent
           opacity={0.85}

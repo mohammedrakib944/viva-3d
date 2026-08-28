@@ -135,6 +135,11 @@ export const STAT_CARDS: StatCard[] = [
 
 export const TUNNEL_LENGTH = 90;
 export const TEN_Z = -TUNNEL_LENGTH - 6;
+// Scroll progress at which the opening "10 years" particle text has
+// finished breaking apart into the tunnel. Shared with CameraRig so it can
+// hold the camera steady (no sway) for exactly as long as the text is
+// still legible.
+export const INTRO_END = 0.18;
 
 // Shared so every 3D-text component reuses the same cached font fetch.
 export const FONT_URL =

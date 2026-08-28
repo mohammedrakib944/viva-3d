@@ -43,7 +43,10 @@ export default function SceneCanvas() {
         }}
       >
         <color attach="background" args={["#030308"]} />
-        <fog attach="fog" args={["#030308", 12, 75]} />
+        {/* far pushed out from 75 to 100 so the now-much-denser ambient
+            particle field stays visible further down the tunnel instead
+            of fading to empty-looking black past 75 units. */}
+        <fog attach="fog" args={["#030308", 12, 100]} />
         <ambientLight intensity={0.15} />
         <Scene />
       </Canvas>

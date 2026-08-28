@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 
-const LINES = ["INITIALIZING...", "VIVASOFT SYSTEM"];
+const LINES = ["INITIALIZING...", "IT'S 10 YEARS OF VIVASOFT"];
 
 export default function BootSequence({
   onEnter,
@@ -28,10 +28,10 @@ export default function BootSequence({
               typeLine(1, LINES[1], () => {
                 timers.push(setTimeout(() => setStage(3), 900));
               });
-            }, 500)
+            }, 500),
           );
         });
-      }, 900)
+      }, 900),
     );
 
     function typeLine(idx: number, text: string, cb: () => void) {

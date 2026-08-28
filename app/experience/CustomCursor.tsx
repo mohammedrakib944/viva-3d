@@ -16,12 +16,10 @@ export default function CustomCursor() {
     let angle = 0;
     let domHover = false;
     let canvasHover = false;
-    let dragging = false;
 
     const applyScale = () => {
-      const scale = dragging ? 2.6 : domHover || canvasHover ? 1.8 : 1;
+      const scale = domHover || canvasHover ? 1.8 : 1;
       star.style.setProperty("--scale", String(scale));
-      star.style.setProperty("--star-color", dragging ? "#ffffff" : "#4fd6ff");
     };
 
     const onMove = (e: PointerEvent) => {
@@ -42,13 +40,6 @@ export default function CustomCursor() {
       applyScale();
     };
 
-    // Extra tactile feedback while actively dragging an interactive object
-    // (e.g. the "10") — the star grows and turns white.
-    const onCanvasDrag = (e: Event) => {
-      dragging = (e as CustomEvent<boolean>).detail;
-      applyScale();
-    };
-
     let frame: number;
     const tick = () => {
       angle += 0.4;
@@ -58,13 +49,11 @@ export default function CustomCursor() {
 
     window.addEventListener("pointermove", onMove);
     window.addEventListener("cursor-hover", onCanvasHover);
-    window.addEventListener("cursor-drag", onCanvasDrag);
     frame = requestAnimationFrame(tick);
 
     return () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("cursor-hover", onCanvasHover);
-      window.removeEventListener("cursor-drag", onCanvasDrag);
       cancelAnimationFrame(frame);
     };
   }, []);
@@ -86,7 +75,7 @@ export default function CustomCursor() {
       >
         <path
           d="M12 2L13.6 10.4L22 12L13.6 13.6L12 22L10.4 13.6L2 12L10.4 10.4L12 2Z"
-          fill="var(--star-color, #4fd6ff)"
+          fill="#4fd6ff"
         />
       </svg>
     </div>

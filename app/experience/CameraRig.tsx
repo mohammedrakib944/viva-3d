@@ -4,7 +4,7 @@ import { useRef } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 import { useScroll } from "./ScrollProvider";
-import { TEN_Z, TUNNEL_LENGTH } from "./data";
+import { INTRO_END, TEN_Z, TUNNEL_LENGTH } from "./data";
 
 function smoothstep(t: number) {
   const x = THREE.MathUtils.clamp(t, 0, 1);
@@ -46,12 +46,23 @@ export default function CameraRig() {
     smoothPointer.current.lerp(state.pointer, 0.06);
     const drift = smoothPointer.current;
 
+    // Both the scroll-driven sway (sin/cos) and the mouse-parallax drift
+    // are suppressed while the "10 years" particle text is still
+    // intact/breaking apart — any camera movement there reads as the text
+    // itself rotating, since it's a large object filling most of the
+    // frame. They fade in smoothly right as the text finishes dispersing.
+    const swaySuppression = smoothstep((p - INTRO_END) / 0.06);
+
     targetPos.current.set(
-      Math.sin(p * 5) * 0.4 + drift.x * 0.4,
-      Math.cos(p * 3.2) * 0.25 + drift.y * 0.25,
+      (Math.sin(p * 5) * 0.4 + drift.x * 0.4) * swaySuppression,
+      (Math.cos(p * 3.2) * 0.25 + drift.y * 0.25) * swaySuppression,
       camZ
     );
-    targetLookAt.current.set(drift.x * 0.5, drift.y * 0.35, lookZ);
+    targetLookAt.current.set(
+      drift.x * 0.5 * swaySuppression,
+      drift.y * 0.35 * swaySuppression,
+      lookZ
+    );
 
     const smoothing = 1 - Math.pow(0.0015, delta);
     state.camera.position.lerp(targetPos.current, smoothing);

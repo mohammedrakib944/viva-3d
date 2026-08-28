@@ -31,38 +31,86 @@ const TRAIL_MIN_SPACING = 0.15;
 const KEY_LIGHT_INTENSITY = 55;
 const RIM_LIGHT_INTENSITY = 32;
 
-// Tunnel-flight -> orbit hand-off, keyed to scroll progress. This ramps all
-// the way to 1 (rather than stopping partway, e.g. at 0.9) so the character
-// keeps easing continuously for as long as the page can still scroll —
-// otherwise it fully "arrives" while there's still scroll room left, and
-// sits frozen (no visible response to further scrolling) until the wheel
-// takes over at ORBIT_WHEEL_ENGAGE_PROGRESS.
+// Tunnel-flight -> orbit hand-off, keyed to scroll progress. The blend
+// finishes (ORBIT_BLEND_END) at exactly the same progress where the wheel
+// takes over (ORBIT_WHEEL_ENGAGE_PROGRESS) — both point at the same shared
+// constant below, on purpose. Any gap between the two creates a dead zone
+// where the character has fully "arrived" but the wheel hasn't engaged yet,
+// so continuing to scroll produces zero visible motion until you cross that
+// gap. Requiring literal floating-point equality to 1 for the engage
+// threshold caused exactly this, intermittently: real scroll momentum and
+// overscroll bounce can leave the computed progress hovering just under 1
+// instead of landing on it precisely, which varies with frame timing — so it
+// showed up as inconsistent, sometimes-stuck behavior, worse in production
+// where that timing is less predictable than local testing. A small margin
+// below the true max fixes both problems at once.
+const ORBIT_SETTLE_PROGRESS = 0.99;
 const ORBIT_BLEND_START = 0.78;
-const ORBIT_BLEND_END = 0.98;
+const ORBIT_BLEND_END = ORBIT_SETTLE_PROGRESS;
 
 // The orbit itself, once engaged: an inclined circle around the "10",
 // steered by the scroll wheel rather than the tunnel path.
 const ORBIT_RADIUS = 3.6;
 const ORBIT_TILT = 0.4;
-// After 1 second of easing, this fraction of the gap to the wheel's target
-// angle still remains — smaller is snappier, closer to 1 is slower/statelier.
-const ORBIT_EASE_BASE = 0.2;
+// Speed (rad/sec) the rendered angle closes the gap to the wheel's target
+// at, scaled by how big the gap currently is — but clamped between a floor
+// and a ceiling, never a smooth percentage-of-remaining-gap decay (that
+// always decelerates all the way to zero near the target, and the larger
+// the gap, the longer that slow-down tail takes to become imperceptible —
+// which is what made a fast scroll burst glide to a stop for *longer*
+// instead of landing faster). A single small wheel-tick's worth of motion
+// moves at the floor speed — slow enough to read as a smooth, continuous
+// glide instead of resolving in one frame (which is what showed up as
+// "jumping": each discrete wheel tick snapping to its new position almost
+// instantly, then holding until the next one). A large gap (e.g. landing
+// back at the entry point after several rounds) moves at the ceiling speed
+// instead of inheriting that same slow pace. Neither end decays toward
+// zero — once the remaining gap is smaller than one frame's step at
+// whatever speed is in effect, it snaps directly to the target, so it
+// always stops cleanly rather than gliding in. Verified by simulation
+// (not just derived by hand, since the floor clamp interacting with the
+// gap-proportional scaling is easy to get subtly wrong): at this floor, a
+// single wheel-tick's glide takes ~250ms and even landing after several
+// full laps takes well under a second — lowering the floor further keeps
+// smoothing out single-tick input at the cost of extending that same total
+// return time (they're coupled: any smooth final approach costs roughly
+// its own glide time regardless of how far the trip started).
+const ORBIT_MIN_ANGULAR_SPEED = 1;
+const ORBIT_MAX_ANGULAR_SPEED = 18;
+const ORBIT_CATCHUP_RATE = 6;
 const ORBIT_WHEEL_SENSITIVITY = 0.0026;
-const ORBIT_TURN_DURATION = 1.2;
-// Scroll progress genuinely hard-clamps to exactly 1 once the page is fully
-// scrolled (see ScrollProvider), so this can require the true max exactly —
-// matching ORBIT_BLEND_END above (which reaches 1 by the same point) rather
-// than an earlier approximation, so the position-blend finishes fully
-// settling before wheel control takes over, instead of the two overlapping.
-const ORBIT_WHEEL_ENGAGE_PROGRESS = 1;
+// Caps how far the wheel-driven target can get AHEAD of the actually
+// rendered angle, as a sanity bound against an unbounded runaway lead from
+// a very long forward-scrolling burst. Deliberately one-directional: only
+// the forward/ahead side is capped. Capping the other side too (i.e. how
+// far behind the target can get while reversing) throttled every reversal
+// to whatever pace the rendered angle happened to be catching up at,
+// regardless of how much further you scrolled — reversing back toward the
+// entry point (floored at 0 below) is always fully, immediately responsive
+// to input instead.
+const ORBIT_MAX_LEAD = Math.PI;
+const ORBIT_WHEEL_ENGAGE_PROGRESS = ORBIT_SETTLE_PROGRESS;
+// How far it banks while closing a gap, leveling out once settled.
+const ORBIT_MAX_ROLL = 0.5;
+
+// Frame-to-frame delta is clamped to this before driving any per-frame
+// integration (easing, rotation smoothing) below — a real stall (a dropped
+// frame, a GC pause, a tab that was briefly backgrounded) otherwise
+// produces one abnormally large delta on the frame right after, which snaps
+// whatever was mid-transition straight to its target instead of continuing
+// to ease — reading as a freeze immediately followed by a pop rather than a
+// smooth, if momentarily slow, motion.
+const MAX_FRAME_DELTA = 0.05;
 
 // Facing direction that keeps the model nose-first along its direction of
 // travel around the orbit circle — flipping `direction` flips this by
-// exactly π, which is what the U-turn animation sweeps through below.
-// (Paired with the negated Z term in orbitFlatZ below — together they make
-// the orbit sweep anti-clockwise from its right-side entry point, which
-// reads as the natural continuation of arriving from that side, rather than
-// clockwise back over where it just came from.)
+// exactly π. Reversing direction is handled by simply letting this jump by
+// π and leaning on the rotation-smoothing already applied to rotation.y
+// below to swing it around — quickly, but never by freezing position to do
+// it. (Paired with the negated Z term in orbitFlatZ below — together they
+// make the orbit sweep anti-clockwise from its right-side entry point,
+// which reads as the natural continuation of arriving from that side,
+// rather than clockwise back over where it just came from.)
 function orbitYaw(direction: 1 | -1, angle: number) {
   return direction === 1 ? Math.PI + angle : angle;
 }
@@ -125,12 +173,11 @@ function Hero() {
   const trailColor = useMemo(() => new THREE.Color("#4fd6ff"), []);
 
   // Orbit state: a wheel-driven target angle, the eased/rendered angle that
-  // actually positions the model, which way it's currently traveling around
-  // the circle, and — while reversing — an in-progress U-turn animation.
+  // actually positions the model (never frozen — always easing toward the
+  // target), and which way it's currently traveling around the circle.
   const orbitAngleTargetRef = useRef(0);
   const orbitAngleRef = useRef(0);
   const orbitDirectionRef = useRef<1 | -1>(1);
-  const orbitTurnRef = useRef({ active: false, progress: 0, startYaw: 0 });
 
   // Which way through the tunnel it's currently facing: away from the
   // camera while advancing (the established convention), front-on while
@@ -154,17 +201,18 @@ function Hero() {
     function onWheel(event: WheelEvent) {
       const atEnd = progressRef.current.value >= ORBIT_WHEEL_ENGAGE_PROGRESS;
       const stillOrbiting =
-        orbitAngleTargetRef.current > 0.0005 ||
-        orbitAngleRef.current > 0.0005 ||
-        orbitTurnRef.current.active;
+        orbitAngleTargetRef.current > 0.0005 || orbitAngleRef.current > 0.0005;
       const intercept = atEnd && (event.deltaY > 0 || stillOrbiting);
 
       if (intercept) {
         document.body.setAttribute("data-lenis-prevent-wheel", "");
         if (event.cancelable) event.preventDefault();
+        const rawTarget =
+          orbitAngleTargetRef.current + event.deltaY * ORBIT_WHEEL_SENSITIVITY;
+        const current = orbitAngleRef.current;
         orbitAngleTargetRef.current = Math.max(
           0,
-          orbitAngleTargetRef.current + event.deltaY * ORBIT_WHEEL_SENSITIVITY
+          Math.min(rawTarget, current + ORBIT_MAX_LEAD)
         );
       } else {
         document.body.removeAttribute("data-lenis-prevent-wheel");
@@ -180,10 +228,12 @@ function Hero() {
     };
   }, [progressRef]);
 
-  useFrame((state, delta) => {
+  useFrame((state, rawDelta) => {
     const p = progressRef.current.value;
     const t = state.clock.elapsedTime;
     if (!groupRef.current) return;
+
+    const delta = Math.min(rawDelta, MAX_FRAME_DELTA);
 
     const pVelocity = prevProgressRef.current === null ? 0 : p - prevProgressRef.current;
     prevProgressRef.current = p;
@@ -205,51 +255,51 @@ function Hero() {
       ORBIT_BLEND_END
     );
 
-    // Ease the rendered angle toward the wheel's target, except mid-turn,
-    // where position holds still while the model visibly banks around to
-    // face the other way — a flying object can't just reverse in place.
+    // Track the wheel's target continuously — position is never frozen,
+    // including through a direction reversal, so there's no window where
+    // scrolling appears to do nothing.
     const target = orbitAngleTargetRef.current;
     const current = orbitAngleRef.current;
     const gap = target - current;
-    const desiredDir: 1 | -1 =
-      Math.abs(gap) < 0.02 ? orbitDirectionRef.current : gap > 0 ? 1 : -1;
-
-    if (
-      !orbitTurnRef.current.active &&
-      desiredDir !== orbitDirectionRef.current
-    ) {
-      orbitTurnRef.current.active = true;
-      orbitTurnRef.current.progress = 0;
-      orbitTurnRef.current.startYaw = orbitYaw(
-        orbitDirectionRef.current,
-        current
-      );
+    // A small dead zone so the facing direction doesn't flicker when it's
+    // essentially stationary (gap ~0), rather than tracking rounding noise.
+    if (Math.abs(gap) > 0.02) {
+      orbitDirectionRef.current = gap > 0 ? 1 : -1;
     }
 
-    let yawTarget: number;
-    if (orbitTurnRef.current.active) {
-      orbitTurnRef.current.progress = Math.min(
-        1,
-        orbitTurnRef.current.progress + delta / ORBIT_TURN_DURATION
-      );
-      const turnT = orbitTurnRef.current.progress;
-      const eased = THREE.MathUtils.smoothstep(turnT, 0, 1);
-      yawTarget = orbitTurnRef.current.startYaw + Math.PI * eased;
-      if (turnT >= 1) {
-        orbitTurnRef.current.active = false;
-        orbitDirectionRef.current = desiredDir;
-      }
-    } else {
-      const easing = 1 - Math.pow(ORBIT_EASE_BASE, delta);
-      const eased = THREE.MathUtils.lerp(current, target, easing);
-      // Exponential decay approaches the target but never quite reaches it —
-      // snap once close enough so it actually settles at exactly 0 (letting
-      // control release back to the page scroll) instead of lingering just
-      // above the "still orbiting" threshold for several more seconds.
-      orbitAngleRef.current =
-        Math.abs(target - eased) < 0.01 ? target : eased;
-      yawTarget = orbitYaw(orbitDirectionRef.current, orbitAngleRef.current);
+    // Move toward the target at a speed scaled to the gap (clamped between
+    // a floor and ceiling) and stop the instant it arrives — see
+    // ORBIT_MIN_ANGULAR_SPEED above for why this isn't a plain constant
+    // speed or a percentage-of-remaining-gap decay.
+    const speed = THREE.MathUtils.clamp(
+      Math.abs(gap) * ORBIT_CATCHUP_RATE,
+      ORBIT_MIN_ANGULAR_SPEED,
+      ORBIT_MAX_ANGULAR_SPEED
+    );
+    const maxStep = speed * delta;
+    const nextAngle = Math.abs(gap) <= maxStep ? target : current + Math.sign(gap) * maxStep;
+    orbitAngleRef.current = nextAngle;
+
+    // Keep the working angle wrapped to a small range on every frame,
+    // rather than letting it grow without bound the longer it orbits. A
+    // multiple of 2π is a complete visual no-op for position (cos/sin are
+    // exactly periodic) — but critically, whenever it's wrapped here, the
+    // rotation this angle has already been driving is nudged by the exact
+    // same amount in the same instant, so the two numbers never fall out of
+    // sync (leaving them out of sync is what used to make it visibly spin
+    // in place: the rotation-smoothing below has no concept of periodicity,
+    // so a stale 2π-multiple offset just reads as a real target it needs to
+    // spin all the way around to reach). Doing it continuously also means
+    // reversing never has more than about one lap to retrace, no matter how
+    // long it's been orbiting.
+    while (Math.abs(orbitAngleRef.current) > Math.PI * 2) {
+      const wrap = Math.sign(orbitAngleRef.current) * Math.PI * 2;
+      orbitAngleRef.current -= wrap;
+      orbitAngleTargetRef.current -= wrap;
+      groupRef.current.rotation.y -= wrap;
     }
+
+    const yawTarget = orbitYaw(orbitDirectionRef.current, orbitAngleRef.current);
 
     const a = orbitAngleRef.current;
     const orbitFlatX = Math.cos(a) * ORBIT_RADIUS;
@@ -267,8 +317,9 @@ function Hero() {
     // Yaw blends from the tunnel's forward-facing — away from the camera
     // while advancing, front-on while retreating, so scrolling back up
     // shows its face rather than continuing to fly away — into the orbit's
-    // tangent-facing direction, banking into a turn whenever the wheel
-    // reverses it — it never simply flies backward.
+    // tangent-facing direction. Reversing direction swings this by exactly
+    // π; the smoothing below turns that into a quick swing rather than an
+    // instant flip, without ever pausing the model's actual movement.
     const tunnelYaw = tunnelFacingRef.current === 1 ? Math.PI : 0;
     const smoothing = 1 - Math.pow(0.0005, delta);
     groupRef.current.rotation.y = THREE.MathUtils.lerp(
@@ -276,10 +327,11 @@ function Hero() {
       THREE.MathUtils.lerp(tunnelYaw, yawTarget, orbitBlend),
       smoothing
     );
-    // A bank into the U-turn, easing back to level once it's done.
-    const turnRoll = orbitTurnRef.current.active
-      ? Math.sin(orbitTurnRef.current.progress * Math.PI) * 0.5
-      : 0;
+    // Banks toward whichever way it's currently closing the gap, leveling
+    // out once there's nothing left to close — the smoothing below turns
+    // this on/off target into a quick lean in and out rather than a snap.
+    const turnRoll =
+      Math.abs(gap) > 0.01 ? -Math.sign(gap) * ORBIT_MAX_ROLL * orbitBlend : 0;
     groupRef.current.rotation.z = THREE.MathUtils.lerp(
       groupRef.current.rotation.z,
       turnRoll,

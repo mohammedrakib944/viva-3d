@@ -15,7 +15,8 @@ import { useScroll } from "./ScrollProvider";
 import { makeStarTexture } from "./starTexture";
 import { TEN_Z } from "./data";
 
-const GLB_URL = "/3d-models/hero-1.optimized.glb";
+const HERO_URL = "/3d-models/hero-1.optimized.glb";
+const FRIEND_URL = "/3d-models/hero-2.optimized.glb";
 const TARGET_HEIGHT = 2.4;
 const TRAIL_COUNT = 36;
 // A trail point is only recorded once the model has moved at least this far
@@ -30,6 +31,30 @@ const TRAIL_MIN_SPACING = 0.15;
 // legacy-lighting default of ~10 is nearly invisible at this range.
 const KEY_LIGHT_INTENSITY = 55;
 const RIM_LIGHT_INTENSITY = 32;
+
+// The second character flies as hero's companion: same shared orbit/tunnel
+// state, not a second copy of it, but mirrored rather than following —
+// it flies to the side (with real breathing room from hero) through the
+// tunnel, then enters the orbit from the opposite (left) side and circles
+// the logo the opposite way (clockwise, while hero goes anti-clockwise) —
+// see the friendAngle/friendDirection math below for how "opposite side,
+// opposite rotation" falls out of one sign flip on the shared angle.
+// Equal-magnitude, opposite-sign lateral offsets — hero to the right of
+// center, friend to the left — so the two carry the same visual weight
+// during tunnel flight instead of one reading as centered/primary and the
+// other as an offset sidekick. Total separation between them is unchanged
+// from before (still 2.2 apart), just centered rather than one-sided.
+const HERO_LATERAL_OFFSET = 1.1;
+const FRIEND_LATERAL_OFFSET = -1.1;
+const FRIEND_Z_OFFSET = 1.6; // further separated in tunnel depth too
+const FRIEND_TIME_OFFSET = 0.9; // phase-shifts its bob rhythm so the two don't move in perfect lockstep
+// A mirrored orbit (see friendAngle below) still crosses hero's own path
+// twice per lap if they share a radius — the two circles intersect wherever
+// they're both at the same distance from center on the same side. Giving
+// the friend its own, different radius means their paths are two genuinely
+// different circles that never touch, rather than the same circle timed to
+// avoid colliding.
+const FRIEND_ORBIT_RADIUS = 4.3;
 
 // Tunnel-flight -> orbit hand-off, keyed to scroll progress. The blend
 // finishes (ORBIT_BLEND_END) at exactly the same progress where the wheel
@@ -108,7 +133,7 @@ const ORBIT_MAX_ROLL = 0.5;
 // smooth, if momentarily slow, motion.
 const MAX_FRAME_DELTA = 0.05;
 
-// Facing direction that keeps the model nose-first along its direction of
+// Facing direction that keeps a character nose-first along its direction of
 // travel around the orbit circle — flipping `direction` flips this by
 // exactly π. Reversing direction is handled by simply letting this jump by
 // π and leaning on the rotation-smoothing already applied to rotation.y
@@ -121,18 +146,94 @@ function orbitYaw(direction: 1 | -1, angle: number) {
   return direction === 1 ? Math.PI + angle : angle;
 }
 
-function Hero() {
-  const { progressRef } = useScroll();
-  const groupRef = useRef<THREE.Group>(null);
-  const keyLightRef = useRef<THREE.PointLight>(null);
-  const rimLightRef = useRef<THREE.PointLight>(null);
-  const trailPointsRef = useRef<THREE.Points>(null);
+type Pose = { x: number; y: number; z: number; rotY: number; rotZ: number };
 
-  const { scene } = useGLTF(GLB_URL);
+// Pure position/facing formula for one character at one moment — called
+// once per character per frame with its own angle and direction (see
+// friendAngle/friendDirection in FlyingCharacter below for how the friend's
+// mirrored entry/rotation falls out of this) and spatial offsets, so hero
+// and its friend share every bit of the underlying flight math without
+// either duplicating or hard-coding the other's position.
+function computePose(params: {
+  camZ: number;
+  t: number;
+  orbitBlend: number;
+  angle: number;
+  direction: 1 | -1;
+  tunnelFacing: 1 | -1;
+  turnRoll: number;
+  lateralOffset: number;
+  zOffset: number;
+  timeOffset: number;
+  orbitRadius: number;
+}): Pose {
+  const {
+    camZ,
+    t,
+    orbitBlend,
+    angle,
+    direction,
+    tunnelFacing,
+    turnRoll,
+    lateralOffset,
+    zOffset,
+    timeOffset,
+    orbitRadius,
+  } = params;
+  const bt = t - timeOffset;
+
+  // Simple vertical bob plus forward travel through the tunnel — no
+  // lateral (X-axis) drift beyond a fixed per-character offset, so the
+  // flight path stays calm rather than busy.
+  const followZ = camZ - 6 - Math.sin(bt * 0.22) * 3.4 + zOffset;
+  const weaveY = Math.cos(bt * 0.26) * 1.4 + Math.sin(bt * 1.2) * 0.2;
+
+  const orbitFlatX = Math.cos(angle) * orbitRadius;
+  // Negated so the orbit sweeps anti-clockwise from its right-side entry
+  // point (see orbitYaw above, which is derived to match this sign).
+  const orbitFlatZ = -Math.sin(angle) * orbitRadius;
+  const orbitY = 0.3 + orbitFlatZ * Math.sin(ORBIT_TILT) * 0.5;
+  const orbitZ = TEN_Z + orbitFlatZ * Math.cos(ORBIT_TILT);
+
+  const x = THREE.MathUtils.lerp(lateralOffset, orbitFlatX, orbitBlend);
+  const y = THREE.MathUtils.lerp(weaveY, orbitY, orbitBlend);
+  const z = THREE.MathUtils.lerp(followZ, orbitZ, orbitBlend);
+
+  // Yaw blends from the tunnel's forward-facing — away from the camera
+  // while advancing, front-on while retreating, so scrolling back up shows
+  // its face rather than continuing to fly away — into the orbit's
+  // tangent-facing direction. Reversing direction swings this by exactly π;
+  // the smoothing applied where this is used turns that into a quick swing
+  // rather than an instant flip, without ever pausing the model's actual
+  // movement.
+  const tunnelYaw = tunnelFacing === 1 ? Math.PI : 0;
+  const yawTarget = orbitYaw(direction, angle);
+  const rotY = THREE.MathUtils.lerp(tunnelYaw, yawTarget, orbitBlend);
+
+  return { x, y, z, rotY, rotZ: turnRoll };
+}
+
+function createTrailAssets() {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute(
+    "position",
+    new THREE.BufferAttribute(new Float32Array(TRAIL_COUNT * 3), 3)
+  );
+  geometry.setAttribute(
+    "color",
+    new THREE.BufferAttribute(new Float32Array(TRAIL_COUNT * 3), 3)
+  );
+  const history = Array.from({ length: TRAIL_COUNT }, () => new THREE.Vector3());
+  const color = new THREE.Color("#4fd6ff");
+  return { geometry, history, color };
+}
+
+function HeroModel({ url }: { url: string }) {
+  const { scene } = useGLTF(url);
 
   // The source asset is an arbitrary export scale/pivot — normalize it to a
-  // known height, centered on its own origin, so the flight-path math below
-  // can treat it as a unit-scale object.
+  // known height, centered on its own origin, so the flight-path math
+  // above can treat it as a unit-scale object.
   const model = useMemo(() => {
     const clone = scene.clone(true);
 
@@ -152,40 +253,60 @@ function Hero() {
     return clone;
   }, [scene]);
 
-  // Comet-style trail: a short ring buffer of past positions rendered as
-  // dimming star sprites, so the flight through the tunnel leaves a
-  // streak behind it instead of gliding through silently.
-  const starTexture = useMemo(() => makeStarTexture(), []);
-  useEffect(() => () => starTexture.dispose(), [starTexture]);
+  return <primitive object={model} />;
+}
 
-  const trailGeometry = useMemo(() => {
-    const geom = new THREE.BufferGeometry();
-    geom.setAttribute(
-      "position",
-      new THREE.BufferAttribute(new Float32Array(TRAIL_COUNT * 3), 3)
-    );
-    geom.setAttribute(
-      "color",
-      new THREE.BufferAttribute(new Float32Array(TRAIL_COUNT * 3), 3)
-    );
-    return geom;
-  }, []);
-  useEffect(() => () => trailGeometry.dispose(), [trailGeometry]);
+class HeroBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+  componentDidCatch(error: unknown) {
+    console.warn("A flying character failed to load — hiding it.", error);
+  }
+  render() {
+    // If the model fails to load for any reason, just don't render it —
+    // never take the rest of the scene down with it.
+    if (this.state.failed) return null;
+    return this.props.children;
+  }
+}
 
-  const trailHistory = useMemo(
-    () => Array.from({ length: TRAIL_COUNT }, () => new THREE.Vector3()),
-    []
-  );
-  const trailColor = useMemo(() => new THREE.Color("#4fd6ff"), []);
+export default function FlyingCharacter() {
+  const { progressRef } = useScroll();
+
+  // Each character's own refs/geometry, declared directly (not routed
+  // through a shared bundle or a custom hook that returns one) so every
+  // ref stays a plain, direct useRef() binding the hooks linter can trace.
+  const heroGroupRef = useRef<THREE.Group>(null);
+  const heroKeyLightRef = useRef<THREE.PointLight>(null);
+  const heroRimLightRef = useRef<THREE.PointLight>(null);
+  const heroTrailPointsRef = useRef<THREE.Points>(null);
+  const heroTrail = useMemo(() => createTrailAssets(), []);
+  useEffect(() => () => heroTrail.geometry.dispose(), [heroTrail]);
+  const heroStarTexture = useMemo(() => makeStarTexture(), []);
+  useEffect(() => () => heroStarTexture.dispose(), [heroStarTexture]);
+
+  const friendGroupRef = useRef<THREE.Group>(null);
+  const friendKeyLightRef = useRef<THREE.PointLight>(null);
+  const friendRimLightRef = useRef<THREE.PointLight>(null);
+  const friendTrailPointsRef = useRef<THREE.Points>(null);
+  const friendTrail = useMemo(() => createTrailAssets(), []);
+  useEffect(() => () => friendTrail.geometry.dispose(), [friendTrail]);
+  const friendStarTexture = useMemo(() => makeStarTexture(), []);
+  useEffect(() => () => friendStarTexture.dispose(), [friendStarTexture]);
 
   // Orbit state: a wheel-driven target angle, the eased/rendered angle that
-  // actually positions the model (never frozen — always easing toward the
-  // target), and which way it's currently traveling around the circle.
+  // actually positions both characters (never frozen — always easing
+  // toward the target), and which way hero is currently traveling around
+  // the circle. Shared, not duplicated, so hero and its friend always move
+  // off the same input rather than needing two independent copies of this
+  // (already the trickiest part of the whole file) kept in sync by hand.
   const orbitAngleTargetRef = useRef(0);
   const orbitAngleRef = useRef(0);
   const orbitDirectionRef = useRef<1 | -1>(1);
 
-  // Which way through the tunnel it's currently facing: away from the
+  // Which way through the tunnel they're currently facing: away from the
   // camera while advancing (the established convention), front-on while
   // retreating — updated only on a real scroll direction, not on the tiny
   // per-frame noise around zero while scroll is essentially still, so it
@@ -237,8 +358,6 @@ function Hero() {
   useFrame((state, rawDelta) => {
     const p = progressRef.current.value;
     const t = state.clock.elapsedTime;
-    if (!groupRef.current) return;
-
     const delta = Math.min(rawDelta, MAX_FRAME_DELTA);
 
     const pVelocity = prevProgressRef.current === null ? 0 : p - prevProgressRef.current;
@@ -246,11 +365,7 @@ function Hero() {
     if (pVelocity > 1e-6) tunnelFacingRef.current = 1;
     else if (pVelocity < -1e-6) tunnelFacingRef.current = -1;
 
-    // Simple vertical bob plus forward travel through the tunnel — no
-    // lateral (X-axis) drift, so the flight path stays calm rather than busy.
     const camZ = state.camera.position.z;
-    const followZ = camZ - 6 - Math.sin(t * 0.22) * 3.4;
-    const weaveY = Math.cos(t * 0.26) * 1.4 + Math.sin(t * 1.2) * 0.2;
 
     // Near the end of the scroll, peel off the tunnel path into a standing,
     // inclined orbit around the "10" — arriving at one side of it rather
@@ -289,135 +404,153 @@ function Hero() {
     // Keep the working angle wrapped to a small range on every frame,
     // rather than letting it grow without bound the longer it orbits. A
     // multiple of 2π is a complete visual no-op for position (cos/sin are
-    // exactly periodic) — but critically, whenever it's wrapped here, the
-    // rotation this angle has already been driving is nudged by the exact
-    // same amount in the same instant, so the two numbers never fall out of
-    // sync (leaving them out of sync is what used to make it visibly spin
-    // in place: the rotation-smoothing below has no concept of periodicity,
-    // so a stale 2π-multiple offset just reads as a real target it needs to
-    // spin all the way around to reach). Doing it continuously also means
-    // reversing never has more than about one lap to retrace, no matter how
-    // long it's been orbiting.
+    // exactly periodic) — but critically, whenever it's wrapped here, each
+    // character's rotation (already driven by a function of this angle) is
+    // nudged by the matching amount in the same instant, so neither ever
+    // falls out of sync (leaving them out of sync is what used to make a
+    // character visibly spin in place: the rotation-smoothing has no
+    // concept of periodicity, so a stale offset just reads as a real
+    // target it needs to spin all the way around to reach). Doing it
+    // continuously also means reversing never has more than about one lap
+    // to retrace, no matter how long it's been orbiting.
+    //
+    // Hero's own yaw is a function of +baseAngle, so it shifts by the same
+    // -wrap applied to baseAngle below. The friend's angle is mirrored
+    // (π - baseAngle, see friendAngle below), so when baseAngle shifts by
+    // -wrap, the friend's angle shifts by the opposite +wrap — its
+    // rotation needs the opposite correction, not the same one.
     while (Math.abs(orbitAngleRef.current) > Math.PI * 2) {
       const wrap = Math.sign(orbitAngleRef.current) * Math.PI * 2;
       orbitAngleRef.current -= wrap;
       orbitAngleTargetRef.current -= wrap;
-      groupRef.current.rotation.y -= wrap;
+      if (heroGroupRef.current) heroGroupRef.current.rotation.y -= wrap;
+      if (friendGroupRef.current) friendGroupRef.current.rotation.y += wrap;
     }
 
-    const yawTarget = orbitYaw(orbitDirectionRef.current, orbitAngleRef.current);
-
-    const a = orbitAngleRef.current;
-    const orbitFlatX = Math.cos(a) * ORBIT_RADIUS;
-    // Negated so the orbit sweeps anti-clockwise from its right-side entry
-    // point (see orbitYaw above, which is derived to match this sign).
-    const orbitFlatZ = -Math.sin(a) * ORBIT_RADIUS;
-    const orbitY = 0.3 + orbitFlatZ * Math.sin(ORBIT_TILT) * 0.5;
-    const orbitZ = TEN_Z + orbitFlatZ * Math.cos(ORBIT_TILT);
-
-    const targetX = THREE.MathUtils.lerp(0, orbitFlatX, orbitBlend);
-    const targetY = THREE.MathUtils.lerp(weaveY, orbitY, orbitBlend);
-    const targetZ = THREE.MathUtils.lerp(followZ, orbitZ, orbitBlend);
-    groupRef.current.position.set(targetX, targetY, targetZ);
-
-    // Yaw blends from the tunnel's forward-facing — away from the camera
-    // while advancing, front-on while retreating, so scrolling back up
-    // shows its face rather than continuing to fly away — into the orbit's
-    // tangent-facing direction. Reversing direction swings this by exactly
-    // π; the smoothing below turns that into a quick swing rather than an
-    // instant flip, without ever pausing the model's actual movement.
-    const tunnelYaw = tunnelFacingRef.current === 1 ? Math.PI : 0;
-    const smoothing = 1 - Math.pow(0.0005, delta);
-    groupRef.current.rotation.y = THREE.MathUtils.lerp(
-      groupRef.current.rotation.y,
-      THREE.MathUtils.lerp(tunnelYaw, yawTarget, orbitBlend),
-      smoothing
-    );
-    // Banks toward whichever way it's currently closing the gap, leveling
-    // out once there's nothing left to close — the smoothing below turns
+    // Banks toward whichever way the gap is currently closing, leveling out
+    // once there's nothing left to close — the rotation smoothing turns
     // this on/off target into a quick lean in and out rather than a snap.
     const turnRoll =
       Math.abs(gap) > 0.01 ? -Math.sign(gap) * ORBIT_MAX_ROLL * orbitBlend : 0;
-    groupRef.current.rotation.z = THREE.MathUtils.lerp(
-      groupRef.current.rotation.z,
+    const smoothing = 1 - Math.pow(0.0005, delta);
+    const visibility = THREE.MathUtils.smoothstep(p, 0.06, 0.14);
+    const direction = orbitDirectionRef.current;
+    const tunnelFacing = tunnelFacingRef.current;
+    const baseAngle = orbitAngleRef.current;
+
+    const heroPose = computePose({
+      camZ,
+      t,
+      orbitBlend,
+      angle: baseAngle,
+      direction,
+      tunnelFacing,
       turnRoll,
+      lateralOffset: HERO_LATERAL_OFFSET,
+      zOffset: 0,
+      timeOffset: 0,
+      orbitRadius: ORBIT_RADIUS,
+    });
+    applyHeroPose(heroGroupRef, heroKeyLightRef, heroRimLightRef, heroPose, visibility, smoothing);
+    updateHeroTrail(heroGroupRef, heroTrail, heroTrailPointsRef, visibility);
+
+    // The friend mirrors hero rather than following it: π minus the shared
+    // angle starts it on the opposite (left) side of the circle, and
+    // because that flips the sign of its own angular rate relative to
+    // hero's, it traces the circle in the opposite rotational sense
+    // (clockwise while hero goes anti-clockwise) for free, with no separate
+    // speed or direction state to keep in sync — flip the direction fed
+    // into its own yaw calculation to match, so it still faces nose-first
+    // along whichever way it's actually traveling.
+    const friendAngle = Math.PI - baseAngle;
+    const friendDirection: 1 | -1 = direction === 1 ? -1 : 1;
+    // Banking into a turn means leaning the opposite way when circling in
+    // the opposite rotational sense, so this mirrors along with everything
+    // else above rather than reusing hero's own bank direction.
+    const friendPose = computePose({
+      camZ,
+      t,
+      orbitBlend,
+      angle: friendAngle,
+      direction: friendDirection,
+      tunnelFacing,
+      turnRoll: -turnRoll,
+      lateralOffset: FRIEND_LATERAL_OFFSET,
+      zOffset: FRIEND_Z_OFFSET,
+      timeOffset: FRIEND_TIME_OFFSET,
+      orbitRadius: FRIEND_ORBIT_RADIUS,
+    });
+    applyHeroPose(
+      friendGroupRef,
+      friendKeyLightRef,
+      friendRimLightRef,
+      friendPose,
+      visibility,
       smoothing
     );
-
-    // Fade in once past the boot/initial-commit scene, then stay visible —
-    // including through the "10" climax, where it now orbits — rather than
-    // fading out and disappearing.
-    const visibility = THREE.MathUtils.smoothstep(p, 0.06, 0.14);
-    groupRef.current.visible = visibility > 0.02;
-    groupRef.current.scale.setScalar(visibility);
-
-    // The tunnel's ambient light is deliberately dim — carry the hero's own
-    // key + rim light with it so the PBR material actually reads instead of
-    // rendering near-black in the empty stretches between set pieces.
-    if (keyLightRef.current)
-      keyLightRef.current.intensity = KEY_LIGHT_INTENSITY * visibility;
-    if (rimLightRef.current)
-      rimLightRef.current.intensity = RIM_LIGHT_INTENSITY * visibility;
-
-    // Only record a new trail point once it's moved far enough from the
-    // last one (see TRAIL_MIN_SPACING above); otherwise just keep the head
-    // glued to the model's current position.
-    const head = trailHistory[0];
-    if (
-      head.distanceToSquared(groupRef.current.position) >
-      TRAIL_MIN_SPACING * TRAIL_MIN_SPACING
-    ) {
-      for (let i = trailHistory.length - 1; i > 0; i--) {
-        trailHistory[i].copy(trailHistory[i - 1]);
-      }
-    }
-    trailHistory[0].copy(groupRef.current.position);
-
-    const posAttr = trailGeometry.getAttribute(
-      "position"
-    ) as THREE.BufferAttribute;
-    const colorAttr = trailGeometry.getAttribute(
-      "color"
-    ) as THREE.BufferAttribute;
-    for (let i = 0; i < TRAIL_COUNT; i++) {
-      const point = trailHistory[i];
-      posAttr.setXYZ(i, point.x, point.y, point.z);
-      const fade = visibility * (1 - i / TRAIL_COUNT);
-      colorAttr.setXYZ(
-        i,
-        trailColor.r * fade,
-        trailColor.g * fade,
-        trailColor.b * fade
-      );
-    }
-    posAttr.needsUpdate = true;
-    colorAttr.needsUpdate = true;
-    if (trailPointsRef.current) trailPointsRef.current.visible = visibility > 0.02;
+    updateHeroTrail(friendGroupRef, friendTrail, friendTrailPointsRef, visibility);
   });
 
   return (
     <>
-      <group ref={groupRef}>
+      <group ref={heroGroupRef}>
         <pointLight
-          ref={keyLightRef}
+          ref={heroKeyLightRef}
           color="#4fd6ff"
           intensity={KEY_LIGHT_INTENSITY}
           distance={10}
           position={[1.2, 1, 1.5]}
         />
         <pointLight
-          ref={rimLightRef}
+          ref={heroRimLightRef}
           color="#ffffff"
           intensity={RIM_LIGHT_INTENSITY}
           distance={9}
           position={[-1.2, -0.6, -1.5]}
         />
-        <primitive object={model} />
+        <HeroBoundary>
+          <Suspense fallback={null}>
+            <HeroModel url={HERO_URL} />
+          </Suspense>
+        </HeroBoundary>
       </group>
-
-      <points ref={trailPointsRef} geometry={trailGeometry}>
+      <points ref={heroTrailPointsRef} geometry={heroTrail.geometry}>
         <pointsMaterial
-          map={starTexture}
+          map={heroStarTexture}
+          alphaTest={0.05}
+          size={0.22}
+          vertexColors
+          transparent
+          opacity={0.8}
+          sizeAttenuation
+          depthWrite={false}
+        />
+      </points>
+
+      <group ref={friendGroupRef}>
+        <pointLight
+          ref={friendKeyLightRef}
+          color="#4fd6ff"
+          intensity={KEY_LIGHT_INTENSITY}
+          distance={10}
+          position={[1.2, 1, 1.5]}
+        />
+        <pointLight
+          ref={friendRimLightRef}
+          color="#ffffff"
+          intensity={RIM_LIGHT_INTENSITY}
+          distance={9}
+          position={[-1.2, -0.6, -1.5]}
+        />
+        <HeroBoundary>
+          <Suspense fallback={null}>
+            <HeroModel url={FRIEND_URL} />
+          </Suspense>
+        </HeroBoundary>
+      </group>
+      <points ref={friendTrailPointsRef} geometry={friendTrail.geometry}>
+        <pointsMaterial
+          map={friendStarTexture}
           alphaTest={0.05}
           size={0.22}
           vertexColors
@@ -431,28 +564,77 @@ function Hero() {
   );
 }
 
-class HeroBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
-  state = { failed: false };
-  static getDerivedStateFromError() {
-    return { failed: true };
-  }
-  componentDidCatch(error: unknown) {
-    console.warn("FlyingCharacter failed to load — hiding it.", error);
-  }
-  render() {
-    // If the model fails to load for any reason, just don't render it —
-    // never take the rest of the scene down with it.
-    if (this.state.failed) return null;
-    return this.props.children;
-  }
+// Applies this frame's pose/visibility to one character's group, rotation,
+// scale, and lights — takes the exact ref variables directly (never a
+// bundled object) so the hooks linter can trace each one straight back to
+// its own useRef() call. Position is set directly (never frozen); rotation
+// eases toward its target by the shared `smoothing` factor.
+function applyHeroPose(
+  groupRef: { current: THREE.Group | null },
+  keyLightRef: { current: THREE.PointLight | null },
+  rimLightRef: { current: THREE.PointLight | null },
+  pose: Pose,
+  visibility: number,
+  smoothing: number
+) {
+  const group = groupRef.current;
+  if (!group) return;
+
+  group.position.set(pose.x, pose.y, pose.z);
+  group.rotation.y = THREE.MathUtils.lerp(group.rotation.y, pose.rotY, smoothing);
+  group.rotation.z = THREE.MathUtils.lerp(group.rotation.z, pose.rotZ, smoothing);
+
+  // Fade in once past the boot/initial-commit scene, then stay visible —
+  // including through the "10" climax, where it now orbits — rather than
+  // fading out and disappearing.
+  group.visible = visibility > 0.02;
+  group.scale.setScalar(visibility);
+
+  // The tunnel's ambient light is deliberately dim — carry the character's
+  // own key + rim light with it so the PBR material actually reads instead
+  // of rendering near-black in the empty stretches between set pieces.
+  const keyLight = keyLightRef.current;
+  if (keyLight) keyLight.intensity = KEY_LIGHT_INTENSITY * visibility;
+  const rimLight = rimLightRef.current;
+  if (rimLight) rimLight.intensity = RIM_LIGHT_INTENSITY * visibility;
 }
 
-export default function FlyingCharacter() {
-  return (
-    <HeroBoundary>
-      <Suspense fallback={null}>
-        <Hero />
-      </Suspense>
-    </HeroBoundary>
-  );
+// Advances one character's comet-style trail (a short ring buffer of past
+// positions rendered as dimming star sprites) to its current position.
+function updateHeroTrail(
+  groupRef: { current: THREE.Group | null },
+  trail: ReturnType<typeof createTrailAssets>,
+  trailPointsRef: { current: THREE.Points | null },
+  visibility: number
+) {
+  const group = groupRef.current;
+  if (!group) return;
+  const { history, geometry, color } = trail;
+
+  // Only record a new trail point once it's moved far enough from the last
+  // one (see TRAIL_MIN_SPACING above); otherwise just keep the head glued
+  // to the model's current position.
+  const head = history[0];
+  if (
+    head.distanceToSquared(group.position) >
+    TRAIL_MIN_SPACING * TRAIL_MIN_SPACING
+  ) {
+    for (let i = history.length - 1; i > 0; i--) {
+      history[i].copy(history[i - 1]);
+    }
+  }
+  history[0].copy(group.position);
+
+  const posAttr = geometry.getAttribute("position") as THREE.BufferAttribute;
+  const colorAttr = geometry.getAttribute("color") as THREE.BufferAttribute;
+  for (let i = 0; i < TRAIL_COUNT; i++) {
+    const point = history[i];
+    posAttr.setXYZ(i, point.x, point.y, point.z);
+    const fade = visibility * (1 - i / TRAIL_COUNT);
+    colorAttr.setXYZ(i, color.r * fade, color.g * fade, color.b * fade);
+  }
+  posAttr.needsUpdate = true;
+  colorAttr.needsUpdate = true;
+  const trailPoints = trailPointsRef.current;
+  if (trailPoints) trailPoints.visible = visibility > 0.02;
 }

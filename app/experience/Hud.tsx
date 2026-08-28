@@ -71,7 +71,6 @@ export default function Hud({
       <div className="pointer-events-auto absolute right-6 top-6 flex items-center gap-4 font-mono text-[11px] tracking-[0.25em] text-white/50 sm:right-10 sm:top-10">
         <button
           data-hover
-          data-sound-toggle
           onClick={onToggleSound}
           className="rounded-sm border border-white/10 px-3 py-1.5 transition-colors hover:border-[--accent]/50 hover:text-[--accent]"
         >

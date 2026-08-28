@@ -42,34 +42,14 @@ export function useBackgroundMusic() {
   }, []);
 
   // Browsers block autoplay with sound until the user interacts with the
-  // page (scroll doesn't count). Start playback on the first genuine
-  // interaction elsewhere on the page, if still desired.
-  useEffect(() => {
-    const startOnInteraction = (e: Event) => {
-      if (startedRef.current) return;
-
-      // The sound toggle button handles its own click via the effect below,
-      // so it must not also trigger this generic unlock path.
-      const target = e.target as HTMLElement | null;
-      if (target?.closest("[data-sound-toggle]")) return;
-
-      startedRef.current = true;
-      const audio = audioRef.current;
-      if (audio && on) {
-        audio.play().catch(() => {});
-        fadeTo(0.35, 1200);
-      }
-      window.removeEventListener("pointerdown", startOnInteraction);
-      window.removeEventListener("keydown", startOnInteraction);
-    };
-    window.addEventListener("pointerdown", startOnInteraction);
-    window.addEventListener("keydown", startOnInteraction);
-    return () => {
-      window.removeEventListener("pointerdown", startOnInteraction);
-      window.removeEventListener("keydown", startOnInteraction);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // page (scroll doesn't count). The boot sequence's "ENTER" button is
+  // *guaranteed* to be the first interaction available (it's the only
+  // clickable thing behind a full-screen, scroll-locked overlay), so that
+  // explicit `start()` call below is the only unlock path needed — an
+  // earlier "first interaction anywhere" fallback listener used to race
+  // against it (pointerdown fires before React's click, so it would win
+  // and silently make the ENTER handler's own start() a no-op), which
+  // made the actual trigger path hard to reason about.
 
   // React to explicit toggles (a button click is itself a valid user
   // gesture, so playback is allowed to start here even before the first

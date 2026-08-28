@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 
-const LINES = ["INITIALIZING...", "IT'S 10 YEARS OF VIVASOFT"];
+const LINES = ["INITIALIZING...", "10 YEARS OF VIVASOFT"];
 
 export default function BootSequence({
   onEnter,

@@ -45,7 +45,13 @@ const RIM_LIGHT_INTENSITY = 32;
 // where that timing is less predictable than local testing. A small margin
 // below the true max fixes both problems at once.
 const ORBIT_SETTLE_PROGRESS = 0.99;
-const ORBIT_BLEND_START = 0.78;
+// Widened from 0.78 — starting the blend that much closer to
+// ORBIT_BLEND_END compressed the whole hand-off into a short scroll
+// window, so it visibly finished after very little scrolling. Starting it
+// earlier spreads the same transition over more scroll distance without
+// changing where it must finish (ORBIT_BLEND_END is intentionally still
+// tied to ORBIT_SETTLE_PROGRESS — see the wheel hand-off note above).
+const ORBIT_BLEND_START = 0.6;
 const ORBIT_BLEND_END = ORBIT_SETTLE_PROGRESS;
 
 // The orbit itself, once engaged: an inclined circle around the "10",

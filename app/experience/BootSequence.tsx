@@ -109,7 +109,7 @@ export default function BootSequence({
           <button
             data-hover
             onClick={handleEnter}
-            className="fade-in mt-8 rounded-sm border border-white/20 px-6 py-2.5 text-xs font-medium tracking-[0.3em] text-white transition-colors hover:border-[--accent] hover:text-[--accent]"
+            className="fade-in mt-8 scale-100 rounded-sm border border-white/20 px-6 py-2.5 text-xs font-medium tracking-[0.3em] text-white transition-all duration-200 hover:scale-105 hover:border-[--accent] hover:text-[--accent] hover:shadow-[0_0_20px_-4px_var(--accent)] active:scale-95 active:duration-75"
             style={{ animationDelay: "0.4s" }}
           >
             ENTER

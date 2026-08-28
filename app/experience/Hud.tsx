@@ -58,7 +58,7 @@ export default function Hud({
             key={s.label}
             data-hover
             onClick={() => scrollTo(s.at)}
-            className={`text-left transition-colors hover:text-[--accent] ${
+            className={`text-left transition-all duration-200 hover:translate-x-1 hover:text-[--accent] active:translate-x-0.5 active:text-[--accent] active:duration-75 ${
               activeSection === i ? "text-[--accent]" : ""
             }`}
           >
@@ -72,7 +72,7 @@ export default function Hud({
         <button
           data-hover
           onClick={onToggleSound}
-          className="rounded-sm border border-white/10 px-3 py-1.5 transition-colors hover:border-[--accent]/50 hover:text-[--accent]"
+          className="rounded-sm border border-white/10 px-3 py-1.5 transition-all duration-200 hover:scale-105 hover:border-[--accent]/50 hover:bg-[--accent]/10 hover:text-[--accent] active:scale-95 active:bg-[--accent]/20 active:duration-75"
         >
           {soundOn ? "MUTE" : "UNMUTE"}
         </button>
@@ -93,7 +93,7 @@ export default function Hud({
           key={milestone.year}
           data-hover
           onClick={() => setExpanded((e) => !e)}
-          className="pointer-events-auto absolute bottom-14 left-1/2 w-[min(90vw,380px)] -translate-x-1/2 border-l border-[--accent]/40 bg-white/[0.03] px-5 py-4 text-left backdrop-blur-sm transition-opacity duration-500 sm:left-10 sm:translate-x-0"
+          className="pointer-events-auto absolute bottom-14 left-1/2 w-[min(90vw,380px)] -translate-x-1/2 scale-100 border-l border-[--accent]/40 bg-white/[0.03] px-5 py-4 text-left backdrop-blur-sm transition-[opacity,transform,background-color] duration-500 hover:bg-white/[0.06] active:scale-[0.98] active:bg-white/[0.08] active:duration-75 sm:left-10 sm:translate-x-0"
         >
           <div className="flex items-start justify-between gap-3">
             <div>
